@@ -1,0 +1,614 @@
+---
+title: "STAT3106 Final Project"
+author: "Sara Hassani"
+date: "2023-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# Formatting options and packages
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE,
+                      error = FALSE, 
+                      message = FALSE, 
+                      fig.align='center', fig.width = 5.0, fig.height = 3) #just for the outline
+
+library(formatR)                # allows to format R code
+library(tidyverse)              # allows for Tidy Verse data-cleaning commands
+library(dplyr)
+library(stringr)                # allows to work on character strings and texts
+
+# Paper specific packages
+library(haven)                  # package allows R to read Stata datasets ("read_dta" command)
+library(ggcorrplot)             # package for correlation matrix plot ("ggcorrplot" command)
+library(psych)                  # package for data analysis ("describe" command)
+library(AER)                    # package for data analysis ("ivreg" command)
+library(lm.beta)                # package for standardized coefficients ("lm.betas" command)
+
+library(flexclust)
+library(cluster)
+library(factoextra)
+library(clValid)
+library(fpc)
+library(stats)
+library(caret)
+library(MASS)
+library(randomForest)
+
+
+# Set-up
+set.seed(20136)                 #important because allows to trace random procedures 
+rm(list = ls(all = TRUE))       #remove all previous objects 
+
+```
+
+### I. Data Collection and Description
+
+```{r}
+# Demographic and Accountability Snapshot for NYC Public School for the 2010-2011 school year
+Demographic <- read.csv("2006_-_2012_School_Demographics_and_Accountability_Snapshot.csv", sep = ";") %>%
+  filter(schoolyear == "20102011")
+    # Adjusting the names of schools for Demographic snapshot to make merging the data sets easier
+Demographic$new_name <- str_replace_all(Demographic$Name, "[^[:alnum:]]", "")
+for(i in 1:nrow(Demographic)){
+  if(grepl('PS0', Demographic$new_name[i])){
+    x <- Demographic$new_name[i]
+    new <- as.vector(str_split_fixed(x, pattern = "", n = nchar(x)))
+    new <- new[-3]
+    new <- toString(new)
+    new <- str_replace_all(new, "[^[:alnum:]]", "")
+    Demographic$new_name[i] <- new
+  }
+}
+
+# Class Size for NYC Public Schools for the 2010-2011 school year
+Class_Size <- read.csv("2010-2011_Class_Size_-_School-level_detail.csv", sep = ";") %>%
+  filter(PROGRAM.TYPE == "") 
+    # Adjusting the names of schools for Class Size to make merging the data sets easier
+Class_Size$new_name <- toupper(Class_Size$SCHOOL.NAME)
+Class_Size$new_name <- str_replace_all(Class_Size$new_name, "[^[:alnum:]]", "")
+for(i in 1:nrow(Class_Size)){
+  if(grepl('PS0', Class_Size$new_name[i])){
+    x <- Class_Size$new_name[i]
+    new <- as.vector(str_split_fixed(x, pattern = "", n = nchar(x)))
+    new <- new[-3]
+    new <- toString(new)
+    new <- str_replace_all(new, "[^[:alnum:]]", "")
+    Class_Size$new_name[i] <- new
+  }
+}
+
+# Staff Data for New York State Schools for the 2010-2011 school year
+Staff <- read.csv("Staff.csv") %>%
+  filter(YEAR == 2011)
+    # Adjusting the names of schools for Staff to make merging the data sets easier
+Staff$new_name <- str_replace_all(Staff$SCHOOL_NAME, "[^[:alnum:]]", "")
+
+# School Survey responses for NYC Public Schools for 2011
+School_Survey <- read.csv("masterfile11_gened_final.csv")
+    # Adjusting column names to make merging the data sets easier
+colnames(School_Survey) <- School_Survey[2,]
+School_Survey <- School_Survey[-c(1,2),]
+colnames(School_Survey) <- c("DBN",colnames(School_Survey)[2:ncol(School_Survey)])
+
+# Math Test Average Level for NYC Public Schools for 2011
+Math <- read.csv("2006_-_2012__Math_Test_Results__-_All_Students.csv") %>%
+  filter(Year == 2011, Grade == "All Grades")
+Math$Average_Level <- as.numeric(Math$Pct.Level.1)*1/100 + as.numeric(Math$Pct.Level.2)*2/100 + as.numeric(Math$Pct.Level.3)*3/100 + as.numeric(Math$Pct.Level.4)*4/100
+
+# Merging data
+data <- merge(Staff, Demographic, by = "new_name")
+data <- merge(data, Class_Size, by = "new_name")
+data <- merge(data, School_Survey, by = "DBN")
+data <- merge(data, Math, by = "DBN")
+
+# Variables of Interest
+variables <- as.data.frame(cbind(data$PER_MAS_PLUS, data$frl_percent, data$total_enrollment, data$ell_percent, data$sped_percent, data$white_per, data$SCHOOLWIDE.PUPIL.TEACHER.RATIO, data$aca_p_11, data$aca_t_11, data$Average_Level))
+    # Ensuring all data is in numeric values
+variables <- as.data.frame(lapply(variables, as.numeric))
+variables <- cbind(variables,data$SCHOOL_NAME,data$DBN)
+    # Keep track of variable names
+colnames(variables) <- c("per_mas", "frl_per", "total", "ell_per", "sped_per", "white_per", "ratio", "aca_p", "aca_t", "maths","names","dbn")
+    # Boroughs
+Boroughs <- data$DBN
+for(i in 1:length(Boroughs)){
+  if(grepl("M",Boroughs[i])){ Boroughs[i] <- "Manhattan"
+  }else{
+    if(grepl("X",Boroughs[i])){ Boroughs[i] <- "Bronx"
+    }else{ 
+      if(grepl("Q",Boroughs[i])){ Boroughs[i] <- "Queens"
+      }else{
+        if(grepl("K",Boroughs[i])){ Boroughs[i] <- "Brooklyn"
+        }else{ Boroughs[i] <- "Staten Island"}
+      }
+    }
+  }
+}
+y_Boroughs <- as.factor(Boroughs)
+
+    # School Districts
+Districts <- data$DISTRICT_NAME
+Districts <- gsub("[^[:digit:].]", "", Districts)
+y_Districts <- factor(Districts)
+
+    # Omit missing values
+variables$Boroughs <- y_Boroughs
+variables$Districts <- y_Districts
+variables <- na.omit(variables)
+y_Boroughs <- variables$Boroughs
+y_Districts <- variables$Districts
+id <- data.frame(NAME = variables$names,variables$dbn, variables$Districts, variables$Boroughs)
+variables <- variables[,1:10]
+var <- variables
+```
+
+#### Initial Data Exploration
+
+```{r}
+E <- cbind(variables, y_Boroughs)
+
+ggplot(E,aes(x=per_mas,fill=y_Boroughs))+geom_boxplot()+labs(title="Percentage of Teachers with at least a Masters Degree in schools by Borough") + theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=frl_per,fill=y_Boroughs))+geom_boxplot()+labs(title="Percentage of Students Eligible for Free or Reduced Lunch in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=total,fill=y_Boroughs))+geom_boxplot()+labs(title="Total Student Enrolled in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=ell_per,fill=y_Boroughs))+geom_boxplot()+labs(title="Percentage of English Language Learners in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=sped_per,fill=y_Boroughs))+geom_boxplot()+labs(title="Percentage of Special Education Students in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=white_per,fill=y_Boroughs))+geom_boxplot()+labs(title="Percentage of White Students in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=ratio,fill=y_Boroughs))+geom_boxplot()+labs(title="Students to Teacher ratio in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=aca_p,fill=y_Boroughs))+geom_boxplot()+labs(title="Avergae Score of Parent Academic Expectations in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=aca_t,fill=y_Boroughs))+geom_boxplot()+labs(title="Avergae Score of Teacher Academic Expectations in schools by Borough")+ theme(plot.title = element_text(size = 8))
+
+ggplot(E,aes(x=maths,fill=y_Boroughs))+geom_boxplot()+labs(title="Average Maths Score in Regents' Exams across all School Levels in schools by Borough")+ theme(plot.title = element_text(size = 8))
+```
+
+#### Mapping Clusters in QGIS
+
+```{r}
+# Database of Unites States Public and Charter School
+map <- read.csv("EDGE_GEOCODE_PUBLICSCH_2122 CSV.csv")
+
+# Edit School Names to allow for mergers
+map$NAME <- toupper(map$NAME)
+map <- map[!duplicated(map$NAME), ]
+
+# Merge 
+new_map <- merge(map,id, by = "NAME")
+
+# Variables with Schools IDed
+variables <- cbind(id,var)
+new_map <- merge(new_map,variables,by = "variables.dbn")
+variables <- new_map[,34:43]
+
+# New outputs 
+y_Boroughs <- new_map$variables.Boroughs.x
+y_Districts <- new_map$variables.Districts.y
+```
+
+### II. Statistical Models
+
+#### A. K-Means Clustering
+
+##### 1. Standard K-Means Clustering
+
+```{r}
+# Model Selection - Silhouette Analysis
+silhouette_scores <- rep(NA,30)
+data2 <- as.data.frame(lapply(variables,scale))
+for (k in 2:31) {
+  kmeans_model <- kmeans(data2, centers = k)
+  score <- silhouette(kmeans_model$cluster, dist(data2))
+  silhouette_scores[k - 1] <- mean(score[,3])
+}
+optimal_k <- which.max(silhouette_scores) + 1
+plot(y = silhouette_scores, x = 2:31, main = "Silhouette Score for each K value", xlab = "k")
+optimal_k
+
+# K-Means Clustering with Optimal k
+k <- optimal_k
+num_initializations <- 20
+results_std <- list()
+corr_dstd <- rep(NA,num_initializations)
+
+for (i in 1:num_initializations) {
+  initial_centers <- data2[sample(nrow(data2), k), ]
+  kmeans_result <- kmeans(data2, centers = initial_centers)
+  
+  # Cluster Assignments, Center Means, Within-Cluster Sum of Squares
+  results_std[[i]] <- kmeans_result
+
+  # Correlation Distance between Cluster Centers
+  corr_dstd[i] <- 1 - cor(kmeans_result$centers)
+}
+
+# Model Validation - Stability Test
+km.boot <- clusterboot(data2, B=20, bootmethod="boot", clustermethod=kmeansCBI, krange=k, seed=15555)
+km.boot
+# For mapping, cluster Assignment when k = 2 (only 1 iteration)
+initial_centers <- data2[sample(nrow(data2), k), ]
+kmeans_result <- kmeans(data2, centers = initial_centers)
+new_map$k_2 <- kmeans_result$cluster
+centers <- as.data.frame(kmeans_result$centers)
+
+# Plotting Means comparison between cluster centers and real boroughs
+rownames(borough_means)<-borough_means[,1]
+d <- rbind(centers,borough_means[,-1])
+
+ggplot(d, aes(x = rownames(d), y = per_mas)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for per_mas") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = frl_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for frl_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = total)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for total") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = ell_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for ell_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = sped_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for sped_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = white_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for white_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = ratio)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for ratio") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = aca_p)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for aca_p") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = aca_t)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for aca_t") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = maths)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for maths") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+##### 2. K-Means Clustering to detect patterns for the 5 Boroughs
+
+```{r}
+# Actual Borough Centers
+boroughs <- as.data.frame(lapply(variables,scale))
+boroughs$Boroughs <- y_Boroughs
+borough_means <- aggregate(. ~ Boroughs, data = boroughs, FUN = mean)
+
+# 20 random initializations for clustering
+set.seed(123)
+data <- as.data.frame(lapply(variables,scale))
+k <- 5
+num_initializations <- 20
+results <- list()
+corr_d <- rep(NA,num_initializations)
+assignments <- list()
+classification <- list()
+
+for (i in 1:num_initializations) {
+  initial_centers <- data[sample(nrow(data), k), ]
+  kmeans_result <- kmeans(data, centers = initial_centers)
+  
+  # Cluster Assignments, Center Means, Within-Cluster Sum of Squares
+  results[[i]] <- kmeans_result
+  
+  # Assigning a Borough to each Cluster
+    # Euclidean Distances between Cluster Centers and Boroughs Means
+  distances <- as.data.frame(matrix(NA,ncol = 5, nrow = 5))
+  colnames(distances) <- borough_means[,1]
+  
+  for(m in 1:5){
+    for(j in 1:5){
+      distances[m,j] <- sqrt(rowSums((kmeans_result$centers[m,] - borough_means[j,2:10])^2))
+    }
+  }
+    # Assign Borough with Center closest to Cluster Center
+  assign <- rep(NA,5)
+  
+  for(m in 1:5){
+    c <- which.min(distances[m,])
+    assign[m] <- colnames(distances)[c]
+  }
+  
+  assignments[[i]] <- assign
+  
+  # Correlation Distance between Cluster Centers
+  corr_d[i] <- 1 - cor(kmeans_result$centers)
+  
+  # Classification Report
+  actual <- y_Boroughs
+  predicted <- kmeans_result$cluster
+  
+  for(m in 1:5){
+    index <- which(predicted == m)
+    predicted[index] <- assign[m] 
+  }
+  
+  report <- as.data.frame(matrix(ncol = 5, nrow = 2))
+  row.names(report) <- c("Precision","Recall")
+  colnames(report) <- c("Manhattan", "Bronx", "Brooklyn", "Queens", "Staten Island")
+  
+  for(m in 1:5){
+    actual_m <- actual == colnames(report)[m]
+    predicted_m <- predicted == colnames(report)[m]
+    correct <- actual_m == predicted_m
+    
+    precision <- sum(correct)/sum(predicted_m)
+    recall <- sum(correct)/sum(actual_m)
+    
+    report[1,m] <- precision
+    report[2,m] <- recall
+  }
+  
+  classification[[i]] <- report
+}
+
+km.boot_5 <- clusterboot(data, B=20, bootmethod="boot", clustermethod=kmeansCBI, krange = 5, seed=15555)
+
+# For mapping, cluster Assignment when k = 5 (only 1 iteration)
+
+initial_centers <- data[sample(nrow(data), k), ]
+kmeans_result <- kmeans(data, centers = initial_centers)
+new_map$k_5 <- kmeans_result$cluster
+
+centers <- kmeans_result$centers
+d <- rbind(centers,borough_means[,-1])
+
+ggplot(d, aes(x = rownames(d), y = per_mas)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for per_mas") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = frl_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for frl_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = total)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for total") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = ell_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for ell_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = sped_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for sped_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = white_per)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for white_per") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = ratio)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for ratio") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = aca_p)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for aca_p") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = aca_t)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for aca_t") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(d, aes(x = rownames(d), y = maths)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Category") +
+  ylab("Mean Value") +
+  ggtitle("Means for maths") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+#### B. Principle Component Analysis (PCA) with the 5 Boroughs Classification as the output
+
+```{r}
+# Running PCA
+scale <- as.data.frame(lapply(variables,scale))
+pca <- prcomp(scale)
+
+# Bi-plot
+biplot(pca, xlabs=c(rep("", nrow(variables))), cex=.5)
+
+# Model Selection - Screeplot
+screeplot(pca,type="l")
+```
+
+The screeplot shows that PCA is unnecessary.
+
+#### C. Linear and Quadratic Discriminant Analysis
+
+##### 1. Linear Discriminant Analysis
+
+```{r}
+# Splitting into Test and Training Data
+all <- scale
+all$Y <- y_Boroughs
+
+index <- sample(1:nrow(all), nrow(all)*0.8)
+train <- all[index,]
+test <- all[-index,]
+
+# LDA Model
+lda_model <- lda(Y ~ . , data = train)
+
+  # Test predictions
+lda_test_predicted <- predict(lda_model, newdata = test, type = "response")$class
+lda_train_predicted <- predict(lda_model, newdata = train, type = "response")$class
+
+  # Model Validation - Training and Test Error
+lda_training_error <- mean(lda_train_predicted != train$Y)
+lda_testing_error <- mean(lda_test_predicted != test$Y)
+
+  # Model Validation - Confusion Matrix
+confusionMatrix(test$Y,lda_test_predicted)
+
+# For mapping, predictions by LDA
+new_map$lda <- NA
+new_map$lda[index] <- lda_train_predicted
+new_map$lda[-index] <- lda_test_predicted
+```
+
+##### 2. Quadratic Discriminant Analysis
+
+```{r}
+# QDA Model
+qda_model <- qda(Y ~ . , data = train)
+
+  # Predictions
+qda_test_predicted <- predict(qda_model, newdata = test, type = "response")$class
+qda_train_predicted <- predict(qda_model, newdata = train, type = "response")$class
+
+  # Model Validation - Training and Test Error
+qda_training_error <- mean(qda_train_predicted != train$Y)
+qda_testing_error <- mean(qda_test_predicted != test$Y)
+
+  # Model Validation - Confusion Matrix
+confusionMatrix(test$Y,qda_test_predicted)
+
+# For mapping, predictions by QDA
+new_map$qda <- NA
+new_map$qda[index] <- qda_train_predicted
+new_map$qda[-index] <- qda_test_predicted
+```
+
+#### D. Random Forest
+
+```{r}
+# Splitting Data
+features <- all[, -ncol(all)]  
+target <- all[, ncol(all)] 
+
+set.seed(123)
+trainIndex <- createDataPartition(target, p = 0.8, list = FALSE)  # 80% for training
+train_data <- features[trainIndex, ]
+train_labels <- target[trainIndex]
+test_data <- features[-trainIndex, ]
+test_labels <- target[-trainIndex]
+
+# Train Random Forest
+rf_model <- randomForest(x = train_data, y = train_labels, ntree = 100)
+
+# Predictions
+tree_test_predicted <- predict(rf_model, newdata = test_data)
+tree_train_predicted <- predict(rf_model, newdata = train_data)
+
+# Model Validation - Training and Test Error
+tree_training_error <- mean(tree_train_predicted != train$Y)
+tree_testing_error <- mean(tree_test_predicted != test$Y)
+
+# Model Validation - Confusion Matrix
+confusionMatrix(tree_test_predicted, test_labels)
+
+# For mapping, predictions by Random Forest
+new_map$tree <- NA
+new_map$tree[trainIndex] <- tree_train_predicted
+new_map$tree[-trainIndex] <- tree_test_predicted
+
+
+# Create variable importance plot
+var_importance <- importance(rf_model)
+var_names <- row.names(var_importance)
+var_importance <- as.data.frame(var_importance)
+var_importance$variables <- var_names
+
+ggplot(var_importance, aes(x = reorder(variables, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Variable", y = "Importance") +
+  ggtitle("Variable Importance Plot") +
+  theme_bw()
+
+# Testing Error Comparisons
+
+# Create a vector of model names
+model_names <- c("Random Forest", "QDA", "LDA")
+
+# Create a vector of training error values
+training_errors <- c(tree_testing_error, qda_testing_error, lda_testing_error)
+
+# Create a bar plot
+barplot(training_errors, names.arg = model_names, xlab = "Model", ylab = "Testing Error",
+        main = "Testing Error for Different Models")
+
+# Training Error Comparisons
+
+model_names <- c("Random Forest", "QDA", "LDA")
+
+# Create a vector of training error values
+training_errors <- c(tree_training_error, qda_training_error, lda_training_error)
+
+# Create a bar plot
+barplot(training_errors, names.arg = model_names, xlab = "Model", ylab = "Training Error",
+        main = "Training Error for Different Models")
+```
+
