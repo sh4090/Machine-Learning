@@ -1,9 +1,3 @@
----
-title: "STAT3106 Final Project"
-author: "Sara Hassani"
-date: "2023-03-28"
-output: html_document
----
 
 ```{r setup, include=FALSE}
 
